@@ -8,7 +8,7 @@ import { log } from "./logger.js";
 import { getMyPositions, closePosition, getActiveBin } from "./tools/dlmm.js";
 import { getWalletBalances } from "./tools/wallet.js";
 import { getTopCandidates } from "./tools/screening.js";
-import { fetchPoolMarketData } from "./tools/market-data.js";
+import { fetchPoolMarketData, getMarketDataStats } from "./tools/market-data.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
 import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
 import { executeTool, registerCronRestarter } from "./tools/executor.js";
@@ -241,7 +241,11 @@ export async function runManagementCycle({ silent = false } = {}) {
     for (const p of positionData) {
       const md = marketDataMap.get(p.pool);
       p._marketData = md ?? null;
-      if (md) marketUpdates.set(p.position, md);
+      if (md) {
+        marketUpdates.set(p.position, md);
+      } else {
+        log("market_data", `[mgmt cycle] No DexScreener data for ${p.pair} — emergency exit rules skipped`);
+      }
     }
     if (marketUpdates.size > 0) batchUpdateMarketData(marketUpdates);
 
@@ -287,6 +291,7 @@ export async function runManagementCycle({ silent = false } = {}) {
       if (closeRule) {
         actionMap.set(p.position, closeRule);
         if (closeRule.rule === 7 || closeRule.rule === 8) {
+          log("market_data", `[mgmt_cycle] Emergency rule ${closeRule.rule} (${closeRule.reason}) triggered for ${p.pair} — price5m=${p._marketData?.price_change_5m ?? "?"}% vol5m=$${p._marketData?.volume_5m ?? "?"}`);
           const tracked = getTrackedPosition(p.position);
           appendDecision({
             type: "emergency_exit",
@@ -875,8 +880,14 @@ Summarize the current portfolio health, total fees earned, and performance of al
           }
           break;
         }
-        const closeRule = getDeterministicCloseRule(p, config.management);
+        // BUG FIX: fetch market data so Rules 7 & 8 can evaluate in the fast 30s poll path
+        const pollMd = await fetchPoolMarketData(p.pool).catch(() => null);
+        const closeRule = getDeterministicCloseRule(p, config.management, pollMd);
         if (closeRule) {
+          const isEmergency = closeRule.rule === 7 || closeRule.rule === 8;
+          if (isEmergency) {
+            log("market_data", `[pnl_poll] Emergency rule ${closeRule.rule} (${closeRule.reason}) triggered for ${p.pair} — price5m=${pollMd?.price_change_5m ?? "?"}% vol5m=$${pollMd?.volume_5m ?? "?"}`);
+          }
           const cooldownMs = config.schedule.managementIntervalMin * 60 * 1000;
           const sinceLastTrigger = Date.now() - _pollTriggeredAt;
           if (sinceLastTrigger >= cooldownMs) {
@@ -1393,6 +1404,7 @@ function formatHelpText() {
     "/hive — HiveMind sync status",
     "/hive pull — manual HiveMind pull now",
     "/test-emergency-exit <n> — simulate emergency exit check for position n (dry run, no close)",
+    "/test-pnl-poll <n> — simulate 30s PnL poll for position n including Rules 7 & 8",
     "/pause — stop cron cycles",
     "/resume — start cron cycles again",
     "/stop — shut down agent",
@@ -1619,6 +1631,57 @@ async function telegramHandler(msg) {
         `  pnl: ${pos.pnl_pct ?? "?"}%`,
         ``,
         rule ? `🔴 WOULD CLOSE — Rule ${rule.rule}: ${rule.reason}` : `🟢 No emergency exit triggered`,
+      ];
+      await sendMessage(lines.join("\n"));
+    } catch (e) {
+      await sendMessage(`Error: ${e.message}`).catch(() => { });
+    }
+    return;
+  }
+
+  const pnlPollTestMatch = text.match(/^\/test-pnl-poll\s+(\d+)$/i);
+  if (pnlPollTestMatch) {
+    try {
+      const idx = parseInt(pnlPollTestMatch[1]) - 1;
+      const { positions } = await getMyPositions({ force: true });
+      if (idx < 0 || idx >= positions.length) { await sendMessage("Invalid number. Use /positions first."); return; }
+      const pos = positions[idx];
+      const cur = config.management.solMode ? "◎" : "$";
+
+      // Simulate exactly what the 30s PnL poll does
+      const t0 = Date.now();
+      const md = await fetchPoolMarketData(pos.pool).catch(() => null);
+      const fetchMs = Date.now() - t0;
+      const stats = getMarketDataStats();
+      const hitRateStr = stats.hitRatePct != null ? `${stats.hitRatePct}%` : "n/a";
+
+      const tracked = getTrackedPosition(pos.position);
+      const trailingExit = updatePnlAndCheckExits(pos.position, pos, config.management);
+      const closeRule = getDeterministicCloseRule(pos, config.management, md);
+
+      const mdLines = md ? [
+        `DexScreener (${fetchMs < 10 ? `cache HIT` : `cache MISS, ${fetchMs}ms`}):`,
+        `  vol_5m: ${cur}${md.volume_5m ?? "?"}  peak_vol_5m: ${cur}${tracked?.peak_volume_5m_usd ?? "none"}`,
+        `  price_5m: ${md.price_change_5m != null ? `${md.price_change_5m > 0 ? "+" : ""}${md.price_change_5m}%` : "?"}`,
+        `  buys/sells (5m): ${md.txn_buys_5m ?? "?"}/${md.txn_sells_5m ?? "?"}`,
+        `  liquidity: ${cur}${md.liquidity_usd ?? "?"}`,
+      ] : [`DexScreener: ⚠️ no data (${fetchMs}ms) — Rules 7 & 8 skipped`];
+
+      const exitLabel = trailingExit
+        ? `⚡ TRAILING TP: ${trailingExit.reason}`
+        : closeRule
+          ? `🔴 CLOSE Rule ${closeRule.rule}: ${closeRule.reason}`
+          : `🟢 STAY — no rule triggered`;
+
+      const lines = [
+        `🧪 PnL Poll Simulation: ${pos.pair}`,
+        `Age: ${pos.age_minutes ?? "?"}m | PnL: ${pos.pnl_pct ?? "?"}%`,
+        ``,
+        ...mdLines,
+        ``,
+        `Poll result: ${exitLabel}`,
+        ``,
+        `Cache stats (session): ${stats.hits} hits / ${stats.misses} misses (${hitRateStr} hit rate) | avg latency ${stats.avgLatencyMs}ms`,
       ];
       await sendMessage(lines.join("\n"));
     } catch (e) {
