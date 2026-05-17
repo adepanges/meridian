@@ -363,7 +363,7 @@ After executing, write a brief one-line result per position.
     _managementBusy = false;
     if (!silent && telegramEnabled()) {
       if (mgmtReport) {
-        if (liveMessage) await liveMessage.finalize(stripThink(mgmtReport)).catch(() => { });
+        if (liveMessage) await liveMessage.finalize(stripThink(mgmtReport)).catch(() => {});
         else sendMessage(`🔄 Management Cycle\n\n${stripThink(mgmtReport)}`).catch(() => { });
       }
       for (const p of positions) {
@@ -465,24 +465,6 @@ export async function runScreeningCycle({ silent = false } = {}) {
     // Hard filters after token recon — block launchpads and excessive Jupiter bot holders
     const filteredOut = [];
     const passing = allCandidates.filter(({ pool, ti }) => {
-      // 🆕 RULE: minimum pool age — rug risk paling tinggi di jam-jam awal
-      const ageHours = pool.token_age_hours ?? null;
-      const minAge = config.screening.minPoolAgeHours ?? 6;
-      if (ageHours != null && ageHours < minAge) {
-        log("screening", `Age filter: dropped ${pool.name} — age ${ageHours}h < ${minAge}h`);
-        filteredOut.push({ name: pool.name, reason: `pool too young (${ageHours}h < ${minAge}h)` });
-        return false;
-      }
-
-      // 🆕 RULE: anti-FOMO — skip pool yang pump tinggi 1 jam terakhir
-      const pump1h = ti?.stats_1h?.price_change ?? null;
-      const maxPump = config.screening.maxPump1hPct ?? 40;
-      if (pump1h != null && pump1h > maxPump) {
-        log("screening", `FOMO filter: dropped ${pool.name} — 1h +${pump1h}% > ${maxPump}%`);
-        filteredOut.push({ name: pool.name, reason: `1h pump ${pump1h}% > ${maxPump}%` });
-        return false;
-      }
-
       const launchpad = ti?.launchpad ?? null;
       if (launchpad && config.screening.allowedLaunchpads?.length > 0 && !config.screening.allowedLaunchpads.includes(launchpad)) {
         log("screening", `Skipping ${pool.name} — launchpad ${launchpad} not in allow-list`);
@@ -569,22 +551,22 @@ export async function runScreeningCycle({ silent = false } = {}) {
 
       // OKX signals
       const okxParts = [
-        pool.risk_level != null ? `risk=${pool.risk_level}` : null,
-        pool.bundle_pct != null ? `bundle=${pool.bundle_pct}%` : null,
-        pool.sniper_pct != null ? `sniper=${pool.sniper_pct}%` : null,
-        pool.suspicious_pct != null ? `suspicious=${pool.suspicious_pct}%` : null,
-        pool.new_wallet_pct != null ? `new_wallets=${pool.new_wallet_pct}%` : null,
+        pool.risk_level     != null ? `risk=${pool.risk_level}`               : null,
+        pool.bundle_pct     != null ? `bundle=${pool.bundle_pct}%`            : null,
+        pool.sniper_pct     != null ? `sniper=${pool.sniper_pct}%`            : null,
+        pool.suspicious_pct != null ? `suspicious=${pool.suspicious_pct}%`    : null,
+        pool.new_wallet_pct != null ? `new_wallets=${pool.new_wallet_pct}%`   : null,
         pool.is_rugpull != null ? `rugpull=${pool.is_rugpull ? "YES" : "NO"}` : null,
         pool.is_wash != null ? `wash=${pool.is_wash ? "YES" : "NO"}` : null,
       ].filter(Boolean).join(", ");
       const okxUnavailable = !okxParts && pool.price_vs_ath_pct == null;
 
       const okxTags = [
-        pool.smart_money_buy ? "smart_money_buy" : null,
-        pool.kol_in_clusters ? "kol_in_clusters" : null,
-        pool.dex_boost ? "dex_boost" : null,
-        pool.dex_screener_paid ? "dex_screener_paid" : null,
-        pool.dev_sold_all ? "dev_sold_all(bullish)" : null,
+        pool.smart_money_buy    ? "smart_money_buy"    : null,
+        pool.kol_in_clusters    ? "kol_in_clusters"    : null,
+        pool.dex_boost          ? "dex_boost"          : null,
+        pool.dex_screener_paid  ? "dex_screener_paid"  : null,
+        pool.dev_sold_all       ? "dev_sold_all(bullish)" : null,
       ].filter(Boolean).join(", ");
       const pvpLine = pool.is_pvp
         ? `  pvp: HIGH — rival ${pool.pvp_rival_name || pool.pvp_symbol} (${pool.pvp_rival_mint?.slice(0, 8)}...) has pool ${pool.pvp_rival_pool?.slice(0, 8)}..., tvl=$${pool.pvp_rival_tvl}, holders=${pool.pvp_rival_holders}, fees=${pool.pvp_rival_fees}SOL`
@@ -596,7 +578,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
         `  audit: top10=${top10Pct}%, bots=${botPct}%, fees=${feesSol}SOL${launchpad ? `, launchpad=${launchpad}` : ""}`,
         pvpLine,
         okxParts ? `  okx: ${okxParts}` : okxUnavailable ? `  okx: unavailable` : null,
-        okxTags ? `  tags: ${okxTags}` : null,
+        okxTags  ? `  tags: ${okxTags}` : null,
         pool.price_vs_ath_pct != null ? `  ath: price_vs_ath=${pool.price_vs_ath_pct}%${pool.top_cluster_trend ? `, top_cluster=${pool.top_cluster_trend}` : ""}` : null,
         `  smart_wallets: ${sw?.in_pool?.length ?? 0} present${sw?.in_pool?.length ? ` → CONFIDENCE BOOST (${sw.in_pool.map(w => w.name).join(", ")})` : ""}`,
         activeBin != null ? `  active_bin: ${activeBin}` : null,
@@ -609,15 +591,15 @@ export async function runScreeningCycle({ silent = false } = {}) {
       if (config.darwin?.enabled) {
         const baseMint = pool.base?.mint || pool.base_mint || ti?.mint || null;
         stageSignals(pool.pool, {
-          base_mint: baseMint,
-          organic_score: pool.organic_score ?? null,
-          fee_tvl_ratio: pool.fee_active_tvl_ratio ?? null,
-          volume: pool.volume_window ?? null,
-          mcap: pool.mcap ?? null,
-          holder_count: ti?.holders ?? null,
+          base_mint:             baseMint,
+          organic_score:         pool.organic_score         ?? null,
+          fee_tvl_ratio:         pool.fee_active_tvl_ratio  ?? null,
+          volume:                pool.volume_window         ?? null,
+          mcap:                  pool.mcap                  ?? null,
+          holder_count:          ti?.holders                ?? null,
           smart_wallets_present: (sw?.in_pool?.length ?? 0) > 0,
-          narrative_quality: n?.narrative ? "present" : "absent",
-          volatility: pool.volatility ?? null,
+          narrative_quality:     n?.narrative ? "present" : "absent",
+          volatility:            pool.volatility            ?? null,
         });
       }
 
@@ -700,18 +682,18 @@ IMPORTANT:
 - Never write "unknown" for OKX. Use real values, omit missing fields, or write exactly "OKX: unavailable".
 - Keep the whole report compact and highly scannable for Telegram.
       `, config.llm.maxSteps, [], "SCREENER", config.llm.screeningModel, 2048, {
-      onToolStart: async ({ name }) => {
-        if (name === "deploy_position") deployAttempted = true;
-        await liveMessage?.toolStart(name);
-      },
-      onToolFinish: async ({ name, result, success }) => {
-        if (name === "deploy_position") {
-          deployAttempted = true;
-          deploySucceeded = Boolean(success && result?.success !== false && !result?.error && !result?.blocked);
-        }
-        await liveMessage?.toolFinish(name, result, success);
-      },
-    });
+        onToolStart: async ({ name }) => {
+          if (name === "deploy_position") deployAttempted = true;
+          await liveMessage?.toolStart(name);
+        },
+        onToolFinish: async ({ name, result, success }) => {
+          if (name === "deploy_position") {
+            deployAttempted = true;
+            deploySucceeded = Boolean(success && result?.success !== false && !result?.error && !result?.blocked);
+          }
+          await liveMessage?.toolFinish(name, result, success);
+        },
+      });
     screenReport = content;
     if (/⛔\s*NO DEPLOY/i.test(content)) {
       appendDecision({
@@ -735,7 +717,7 @@ IMPORTANT:
     _screeningBusy = false;
     if (!silent && telegramEnabled()) {
       if (screenReport) {
-        if (liveMessage) await liveMessage.finalize(stripThink(screenReport)).catch(() => { });
+        if (liveMessage) await liveMessage.finalize(stripThink(screenReport)).catch(() => {});
         else sendMessage(`🔍 Screening Cycle\n\n${stripThink(screenReport)}`).catch(() => { });
       }
     }
@@ -1405,20 +1387,20 @@ async function telegramHandler(msg) {
     try {
       await applySettingsMenuCallback(msg);
     } catch (e) {
-      await answerCallbackQuery(msg.callbackQueryId, e.message).catch(() => { });
+      await answerCallbackQuery(msg.callbackQueryId, e.message).catch(() => {});
     }
     return;
   }
   if (text === "/settings" || text === "/menu" || text === "/configmenu") {
-    await showSettingsMenu().catch((e) => sendMessage(`Settings error: ${e.message}`).catch(() => { }));
+    await showSettingsMenu().catch((e) => sendMessage(`Settings error: ${e.message}`).catch(() => {}));
     return;
   }
   if (_managementBusy || _screeningBusy || busy) {
     if (_telegramQueue.length < 5) {
       _telegramQueue.push(msg);
-      sendMessage(`⏳ Queued (${_telegramQueue.length} in queue): "${text.slice(0, 60)}"`).catch(() => { });
+      sendMessage(`⏳ Queued (${_telegramQueue.length} in queue): "${text.slice(0, 60)}"`).catch(() => {});
     } else {
-      sendMessage("Queue is full (5 messages). Wait for the agent to finish.").catch(() => { });
+      sendMessage("Queue is full (5 messages). Wait for the agent to finish.").catch(() => {});
     }
     return;
   }
@@ -1428,13 +1410,13 @@ async function telegramHandler(msg) {
       const briefing = await generateBriefing();
       await sendHTML(briefing);
     } catch (e) {
-      await sendMessage(`Error: ${e.message}`).catch(() => { });
+      await sendMessage(`Error: ${e.message}`).catch(() => {});
     }
     return;
   }
 
   if (text === "/help") {
-    await sendMessage(formatHelpText()).catch(() => { });
+    await sendMessage(formatHelpText()).catch(() => {});
     return;
   }
 
@@ -1444,15 +1426,15 @@ async function telegramHandler(msg) {
       const suffix = text === "/status" && positions.total_positions
         ? `\n\nUse /positions for the numbered list.`
         : "";
-      await sendMessage(`${formatWalletStatus(wallet, positions)}${suffix}`).catch(() => { });
+      await sendMessage(`${formatWalletStatus(wallet, positions)}${suffix}`).catch(() => {});
     } catch (e) {
-      await sendMessage(`Error: ${e.message}`).catch(() => { });
+      await sendMessage(`Error: ${e.message}`).catch(() => {});
     }
     return;
   }
 
   if (text === "/config") {
-    await sendMessage(formatConfigSnapshot()).catch(() => { });
+    await sendMessage(formatConfigSnapshot()).catch(() => {});
     return;
   }
 
@@ -1468,7 +1450,7 @@ async function telegramHandler(msg) {
         return `${i + 1}. ${p.pair} | ${cur}${p.total_value_usd} | PnL: ${pnl} | fees: ${cur}${p.unclaimed_fees_usd} | ${age}${oor}`;
       });
       await sendMessage(`📊 Open Positions (${total_positions}):\n\n${lines.join("\n")}\n\n/close <n> to close | /set <n> <note> to set instruction`);
-    } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => { }); }
+    } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
     return;
   }
 
@@ -1490,7 +1472,7 @@ async function telegramHandler(msg) {
         pos.instruction ? `Note: ${pos.instruction}` : null,
       ].filter(Boolean).join("\n"));
     } catch (e) {
-      await sendMessage(`Error: ${e.message}`).catch(() => { });
+      await sendMessage(`Error: ${e.message}`).catch(() => {});
     }
     return;
   }
@@ -1511,7 +1493,7 @@ async function telegramHandler(msg) {
       } else {
         await sendMessage(`❌ Close failed: ${JSON.stringify(result)}`);
       }
-    } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => { }); }
+    } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
     return;
   }
 
@@ -1529,9 +1511,9 @@ async function telegramHandler(msg) {
           results.push(`${pos.pair}: failed (${error.message})`);
         }
       }
-      await sendMessage(`Close-all finished.\n\n${results.join("\n")}`).catch(() => { });
+      await sendMessage(`Close-all finished.\n\n${results.join("\n")}`).catch(() => {});
     } catch (e) {
-      await sendMessage(`Error: ${e.message}`).catch(() => { });
+      await sendMessage(`Error: ${e.message}`).catch(() => {});
     }
     return;
   }
@@ -1546,7 +1528,7 @@ async function telegramHandler(msg) {
       const pos = positions[idx];
       setPositionInstruction(pos.position, note);
       await sendMessage(`✅ Note set for ${pos.pair}:\n"${note}"`);
-    } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => { }); }
+    } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
     return;
   }
 
@@ -1560,27 +1542,27 @@ async function telegramHandler(msg) {
         reason: "Telegram slash command /setcfg",
       });
       if (!result?.success) {
-        await sendMessage(`Config update failed.\nUnknown: ${(result?.unknown || []).join(", ") || "none"}`).catch(() => { });
+        await sendMessage(`Config update failed.\nUnknown: ${(result?.unknown || []).join(", ") || "none"}`).catch(() => {});
         return;
       }
-      await sendMessage(`✅ Updated ${key} = ${JSON.stringify(value)}`).catch(() => { });
+      await sendMessage(`✅ Updated ${key} = ${JSON.stringify(value)}`).catch(() => {});
     } catch (e) {
-      await sendMessage(`Error: ${e.message}`).catch(() => { });
+      await sendMessage(`Error: ${e.message}`).catch(() => {});
     }
     return;
   }
 
   if (text === "/screen") {
     try {
-      await sendMessage(await runDeterministicScreen(5)).catch(() => { });
+      await sendMessage(await runDeterministicScreen(5)).catch(() => {});
     } catch (e) {
-      await sendMessage(`Error: ${e.message}`).catch(() => { });
+      await sendMessage(`Error: ${e.message}`).catch(() => {});
     }
     return;
   }
 
   if (text === "/candidates") {
-    await sendMessage(describeLatestCandidates(5)).catch(() => { });
+    await sendMessage(describeLatestCandidates(5)).catch(() => {});
     return;
   }
 
@@ -1599,9 +1581,9 @@ async function telegramHandler(msg) {
         coverage,
         `Position: ${result.position || "n/a"}`,
         result.txs?.length ? `Tx: ${result.txs[0]}` : null,
-      ].filter(Boolean).join("\n")).catch(() => { });
+      ].filter(Boolean).join("\n")).catch(() => {});
     } catch (e) {
-      await sendMessage(`Error: ${e.message}`).catch(() => { });
+      await sendMessage(`Error: ${e.message}`).catch(() => {});
     }
     return;
   }
@@ -1609,7 +1591,7 @@ async function telegramHandler(msg) {
   if (text === "/pause") {
     stopCronJobs();
     cronStarted = false;
-    await sendMessage("⏸ Paused autonomous cycles. Telegram control still works. Use /resume to start again.").catch(() => { });
+    await sendMessage("⏸ Paused autonomous cycles. Telegram control still works. Use /resume to start again.").catch(() => {});
     return;
   }
 
@@ -1619,9 +1601,9 @@ async function telegramHandler(msg) {
       timers.managementLastRun = Date.now();
       timers.screeningLastRun = Date.now();
       startCronJobs();
-      await sendMessage("▶️ Autonomous cycles resumed.").catch(() => { });
+      await sendMessage("▶️ Autonomous cycles resumed.").catch(() => {});
     } else {
-      await sendMessage("Autonomous cycles are already running.").catch(() => { });
+      await sendMessage("Autonomous cycles are already running.").catch(() => {});
     }
     return;
   }
@@ -1631,7 +1613,7 @@ async function telegramHandler(msg) {
       const enabled = isHiveMindEnabled();
       const agentId = ensureAgentId();
       if (!enabled) {
-        await sendMessage(`HiveMind: disabled\nAgent ID: ${agentId}\nSet hiveMindApiKey to connect.`).catch(() => { });
+        await sendMessage(`HiveMind: disabled\nAgent ID: ${agentId}\nSet hiveMindApiKey to connect.`).catch(() => {});
         return;
       }
       const isManualPull = text === "/hive pull";
@@ -1650,9 +1632,9 @@ async function telegramHandler(msg) {
         `Shared lessons: ${Array.isArray(lessons) ? lessons.length : (pullMode === "manual" ? "manual" : 0)}`,
         `Presets: ${Array.isArray(presets) ? presets.length : (pullMode === "manual" ? "manual" : 0)}`,
         isManualPull ? "Manual pull: completed" : null,
-      ].join("\n")).catch(() => { });
+      ].join("\n")).catch(() => {});
     } catch (e) {
-      await sendMessage(`HiveMind error: ${e.message}`).catch(() => { });
+      await sendMessage(`HiveMind error: ${e.message}`).catch(() => {});
     }
     return;
   }
@@ -1675,12 +1657,12 @@ async function telegramHandler(msg) {
     if (liveMessage) await liveMessage.finalize(stripThink(content));
     else await sendMessage(stripThink(content));
   } catch (e) {
-    if (liveMessage) await liveMessage.fail(e.message).catch(() => { });
-    else await sendMessage(`Error: ${e.message}`).catch(() => { });
+    if (liveMessage) await liveMessage.fail(e.message).catch(() => {});
+    else await sendMessage(`Error: ${e.message}`).catch(() => {});
   } finally {
     busy = false;
     refreshPrompt();
-    drainTelegramQueue().catch(() => { });
+    drainTelegramQueue().catch(() => {});
   }
 }
 
