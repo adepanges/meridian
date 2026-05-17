@@ -8,6 +8,7 @@ import { log } from "./logger.js";
 import { getMyPositions, closePosition, getActiveBin } from "./tools/dlmm.js";
 import { getWalletBalances } from "./tools/wallet.js";
 import { getTopCandidates } from "./tools/screening.js";
+import { fetchPoolMarketData } from "./tools/market-data.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
 import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
 import { executeTool, registerCronRestarter } from "./tools/executor.js";
@@ -21,11 +22,12 @@ import {
   editMessageWithButtons,
   answerCallbackQuery,
   notifyOutOfRange,
+  notifyEmergencyExit,
   isEnabled as telegramEnabled,
   createLiveMessage,
 } from "./telegram.js";
 import { generateBriefing } from "./briefing.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop, batchUpdateMarketData } from "./state.js";
 import { getActiveStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
@@ -205,6 +207,7 @@ export async function runManagementCycle({ silent = false } = {}) {
   let positions = [];
   let liveMessage = null;
   const screeningCooldownMs = 5 * 60 * 1000;
+  const emergencyExits = [];
 
   try {
     if (!silent && telegramEnabled()) {
@@ -225,6 +228,22 @@ export async function runManagementCycle({ silent = false } = {}) {
       recordPositionSnapshot(p.pool, p);
       return { ...p, recall: recallForPool(p.pool) };
     });
+
+    // Fetch DexScreener market data once per unique pool (shared across positions in same pool)
+    const uniquePools = [...new Set(positionData.map((p) => p.pool))];
+    const marketDataMap = new Map();
+    await Promise.all(uniquePools.map(async (pool) => {
+      const md = await fetchPoolMarketData(pool);
+      marketDataMap.set(pool, md);
+    }));
+    // Update peak volume + history in state (single disk write covers all positions)
+    const marketUpdates = new Map();
+    for (const p of positionData) {
+      const md = marketDataMap.get(p.pool);
+      p._marketData = md ?? null;
+      if (md) marketUpdates.set(p.position, md);
+    }
+    if (marketUpdates.size > 0) batchUpdateMarketData(marketUpdates);
 
     // JS trailing TP check
     const exitMap = new Map();
@@ -264,9 +283,45 @@ export async function runManagementCycle({ silent = false } = {}) {
         continue;
       }
 
-      const closeRule = getDeterministicCloseRule(p, config.management);
+      const closeRule = getDeterministicCloseRule(p, config.management, p._marketData);
       if (closeRule) {
         actionMap.set(p.position, closeRule);
+        if (closeRule.rule === 7 || closeRule.rule === 8) {
+          const tracked = getTrackedPosition(p.position);
+          appendDecision({
+            type: "emergency_exit",
+            actor: "MANAGER",
+            pool: p.pool,
+            pool_name: p.pair,
+            position: p.position,
+            summary: `Emergency exit Rule ${closeRule.rule}: ${closeRule.reason}`,
+            reason: closeRule.reason,
+            metrics: {
+              rule: closeRule.rule,
+              volume_5m: p._marketData?.volume_5m,
+              peak_volume_5m_usd: tracked?.peak_volume_5m_usd,
+              price_change_5m: p._marketData?.price_change_5m,
+              txn_buys_5m: p._marketData?.txn_buys_5m,
+              txn_sells_5m: p._marketData?.txn_sells_5m,
+              liquidity_usd: p._marketData?.liquidity_usd,
+              pnl_pct: p.pnl_pct,
+              age_minutes: p.age_minutes,
+              thresholds: closeRule.rule === 7
+                ? { dropThresholdPct: config.emergencyExits.volumeCollapse.dropThresholdPct, sellPressureRatio: config.emergencyExits.volumeCollapse.sellPressureRatio, minPeakVolumeUsd: config.emergencyExits.volumeCollapse.minPeakVolumeUsd }
+                : { dropPct5m: config.emergencyExits.rapidPriceDrop.dropPct5m, requireNegativePnl: config.emergencyExits.rapidPriceDrop.requireNegativePnl },
+            },
+          });
+          emergencyExits.push({
+            pair: p.pair,
+            reason: closeRule.reason,
+            volume5m: p._marketData?.volume_5m,
+            peakVolume5m: tracked?.peak_volume_5m_usd,
+            priceChange5m: p._marketData?.price_change_5m,
+            txnBuys5m: p._marketData?.txn_buys_5m,
+            txnSells5m: p._marketData?.txn_sells_5m,
+            pnlPct: p.pnl_pct,
+          });
+        }
         continue;
       }
       // Claim rule
@@ -365,6 +420,9 @@ After executing, write a brief one-line result per position.
       if (mgmtReport) {
         if (liveMessage) await liveMessage.finalize(stripThink(mgmtReport)).catch(() => { });
         else sendMessage(`🔄 Management Cycle\n\n${stripThink(mgmtReport)}`).catch(() => { });
+      }
+      for (const exit of emergencyExits) {
+        notifyEmergencyExit(exit).catch(() => { });
       }
       for (const p of positions) {
         if (!p.in_range && p.minutes_out_of_range >= config.management.outOfRangeWaitMinutes) {
@@ -910,7 +968,7 @@ function formatCandidates(candidates) {
   ].join("\n");
 }
 
-function getDeterministicCloseRule(position, managementConfig) {
+function getDeterministicCloseRule(position, managementConfig, marketData = null) {
   const tracked = getTrackedPosition(position.position);
   const pnlSuspect = (() => {
     if (position.pnl_pct == null) return false;
@@ -954,6 +1012,40 @@ function getDeterministicCloseRule(position, managementConfig) {
     const ageHours = Math.round((position.age_minutes ?? 0) / 60);
     return { action: "CLOSE", rule: 6, reason: `max age reached (${ageHours}h)` };
   }
+
+  // Rule 7: volume collapse — pool liquidity drying up with dominant sell pressure
+  if (marketData) {
+    const vcCfg = config.emergencyExits.volumeCollapse;
+    if (vcCfg.enabled) {
+      const tracked = getTrackedPosition(position.position);
+      const ageMin = position.age_minutes ?? 0;
+      const peakVol = tracked?.peak_volume_5m_usd ?? 0;
+      const curVol = marketData.volume_5m;
+      const sells = marketData.txn_sells_5m;
+      const buys = marketData.txn_buys_5m;
+      if (
+        ageMin >= vcCfg.minPositionAgeMin &&
+        peakVol >= vcCfg.minPeakVolumeUsd &&
+        curVol != null && curVol < peakVol * (vcCfg.dropThresholdPct / 100) &&
+        sells != null && buys != null && sells > buys * vcCfg.sellPressureRatio
+      ) {
+        return { action: "CLOSE", rule: 7, reason: "volume collapse" };
+      }
+    }
+  }
+
+  // Rule 8: rapid price dump — sharp 5m drop with negative PnL position
+  if (marketData) {
+    const rpCfg = config.emergencyExits.rapidPriceDrop;
+    if (rpCfg.enabled) {
+      const priceChange5m = marketData.price_change_5m;
+      const pnlOk = !rpCfg.requireNegativePnl || (!pnlSuspect && (position.pnl_pct ?? 0) < 0);
+      if (priceChange5m != null && priceChange5m < rpCfg.dropPct5m && pnlOk) {
+        return { action: "CLOSE", rule: 8, reason: "rapid dump" };
+      }
+    }
+  }
+
   return null;
 }
 
@@ -1300,6 +1392,7 @@ function formatHelpText() {
     "/briefing — morning briefing",
     "/hive — HiveMind sync status",
     "/hive pull — manual HiveMind pull now",
+    "/test-emergency-exit <n> — simulate emergency exit check for position n (dry run, no close)",
     "/pause — stop cron cycles",
     "/resume — start cron cycles again",
     "/stop — shut down agent",
@@ -1493,6 +1586,41 @@ async function telegramHandler(msg) {
         `Age: ${pos.age_minutes ?? "?"}m | ${pos.in_range ? "IN RANGE" : `OOR ${pos.minutes_out_of_range ?? 0}m`}`,
         pos.instruction ? `Note: ${pos.instruction}` : null,
       ].filter(Boolean).join("\n"));
+    } catch (e) {
+      await sendMessage(`Error: ${e.message}`).catch(() => { });
+    }
+    return;
+  }
+
+  const emergencyTestMatch = text.match(/^\/test-emergency-exit\s+(\d+)$/i);
+  if (emergencyTestMatch) {
+    try {
+      const idx = parseInt(emergencyTestMatch[1]) - 1;
+      const { positions } = await getMyPositions({ force: true });
+      if (idx < 0 || idx >= positions.length) { await sendMessage("Invalid number. Use /positions first."); return; }
+      const pos = positions[idx];
+      const md = await fetchPoolMarketData(pos.pool);
+      if (!md) { await sendMessage(`⚠️ DexScreener returned no data for ${pos.pair} (${pos.pool.slice(0, 8)})`); return; }
+      const tracked = getTrackedPosition(pos.position);
+      const rule = getDeterministicCloseRule(pos, config.management, md);
+      const cur = config.management.solMode ? "◎" : "$";
+      const lines = [
+        `🧪 Emergency Exit Simulation: ${pos.pair}`,
+        ``,
+        `Market Data (DexScreener):`,
+        `  vol_5m: ${cur}${md.volume_5m ?? "?"}`,
+        `  price_5m: ${md.price_change_5m != null ? `${md.price_change_5m > 0 ? "+" : ""}${md.price_change_5m}%` : "?"}`,
+        `  buys/sells (5m): ${md.txn_buys_5m ?? "?"}/${md.txn_sells_5m ?? "?"}`,
+        `  liquidity: ${cur}${md.liquidity_usd ?? "?"}`,
+        ``,
+        `Position State:`,
+        `  peak_vol_5m: ${cur}${tracked?.peak_volume_5m_usd ?? "none (first cycle)"}`,
+        `  age: ${pos.age_minutes ?? "?"}m`,
+        `  pnl: ${pos.pnl_pct ?? "?"}%`,
+        ``,
+        rule ? `🔴 WOULD CLOSE — Rule ${rule.rule}: ${rule.reason}` : `🟢 No emergency exit triggered`,
+      ];
+      await sendMessage(lines.join("\n"));
     } catch (e) {
       await sendMessage(`Error: ${e.message}`).catch(() => { });
     }
