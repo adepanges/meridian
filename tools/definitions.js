@@ -1118,53 +1118,73 @@ Blacklisted tokens are filtered BEFORE the LLM even sees pool candidates.`,
   {
     type: "function",
     function: {
-      name: "simulate_lp_position",
-      description: `Simulate a hypothetical DLMM LP position using historical 5m OHLCV candles.
+      name: "open_paper_position",
+      description: `Open a virtual LP position for dry-run simulation. No real funds used.
 
-Replays real price and volume data to estimate:
-- Fee earnings (proportional to your TVL share per bin)
-- Impermanent loss (from price movement through your range)
+The position tracks live 5m OHLCV candles from the moment it opens and accumulates:
+- Fees earned (volume × fee_rate × your TVL share, only when price is in range)
+- IL (impermanent loss from price movement through your range)
 - Net PnL = fees + IL
-- In-range % (how often price stayed inside your range)
-- Annualized fee APR
 
 Supports three liquidity strategies:
-- spot: uniform distribution across all bins (most balanced)
-- curve: concentrated in center bins near active price (higher fee share when in range)
-- bid-ask: concentrated at edges (useful for tight spreads and range order style)
+- spot: uniform across all bins
+- curve: concentrated near center/active price
+- bid-ask: concentrated at edges
 
-Use this before deploying to compare strategies, tune range width, or stress-test a position
-against recent volatility. Mode is always replay (last N hours of real data).`,
+Use before deploying a real position to validate range, strategy, and fee expectations.`,
       parameters: {
         type: "object",
         required: ["pool_address", "deposit_amount", "lower_price", "upper_price"],
         properties: {
-          pool_address: {
-            type: "string",
-            description: "Base58 pool address to simulate",
-          },
-          deposit_amount: {
-            type: "number",
-            description: "Deposit size in USD",
-          },
-          lower_price: {
-            type: "number",
-            description: "Lower bound of the position price range",
-          },
-          upper_price: {
-            type: "number",
-            description: "Upper bound of the position price range",
-          },
+          pool_address:  { type: "string", description: "Base58 pool address" },
+          deposit_amount: { type: "number", description: "Hypothetical deposit in USD" },
+          lower_price:   { type: "number", description: "Lower bound of price range" },
+          upper_price:   { type: "number", description: "Upper bound of price range" },
           strategy_type: {
             type: "string",
             enum: ["spot", "curve", "bid-ask"],
-            description: "Liquidity distribution strategy. Default: spot",
-          },
-          hours: {
-            type: "number",
-            description: "How many hours of historical candles to replay (default: 24, max: 168)",
+            description: "Liquidity distribution strategy (default: spot)",
           },
         },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_paper_position",
+      description: "Get current P&L snapshot of an open or closed paper position.",
+      parameters: {
+        type: "object",
+        required: ["id"],
+        properties: {
+          id: { type: "string", description: "Paper position ID (e.g. paper-abc123)" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "close_paper_position",
+      description: "Close a paper position and return its final P&L summary.",
+      parameters: {
+        type: "object",
+        required: ["id"],
+        properties: {
+          id: { type: "string", description: "Paper position ID to close" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_paper_positions",
+      description: "List all paper positions (open and closed) with their current P&L.",
+      parameters: {
+        type: "object",
+        properties: {},
       },
     },
   },
