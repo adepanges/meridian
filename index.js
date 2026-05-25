@@ -115,6 +115,21 @@ function shouldUsePnlRecheck() {
   return !config.api.lpAgentRelayEnabled;
 }
 
+async function notifyOperators(message) {
+  if (!telegramEnabled()) return;
+  try {
+    await sendMessage(message);
+  } catch (error) {
+    log("telegram_warn", `Operator notification failed: ${error.message}`);
+  }
+}
+
+if (isMain) {
+  notifyOperators(
+    `🟢 Meridian started\nMode: ${process.env.DRY_RUN === "true" ? "DRY RUN" : "LIVE"}\nPID: ${process.pid}\nPM2: ${process.env.pm_id ?? "n/a"}`
+  ).catch(() => {});
+}
+
 function schedulePeakConfirmation(positionAddress) {
   if (!positionAddress || _peakConfirmTimers.has(positionAddress)) return;
 
@@ -736,7 +751,7 @@ export function startCronJobs() {
 
   const screenTask = cron.schedule(`*/${Math.max(1, config.schedule.screeningIntervalMin)} * * * *`, runScreeningCycle);
 
-  const healthTask = cron.schedule(`0 * * * *`, async () => {
+  const healthTask = cron.schedule(`*/${Math.max(1, config.schedule.healthCheckIntervalMin)} * * * *`, async () => {
     if (_managementBusy) return;
     _managementBusy = true;
     log("cron", "Starting health check");
@@ -763,8 +778,9 @@ Summarize the current portfolio health, total fees earned, and performance of al
     await maybeRunMissedBriefing();
   }, { timezone: 'UTC' });
 
-  // Lightweight 30s PnL poller — updates trailing TP state between management cycles, no LLM
+  // Lightweight PnL poller — updates trailing TP state between management cycles, no LLM
   let _pnlPollBusy = false;
+  const pnlPollIntervalMs = Math.max(30, Number(config.schedule.pnlPollIntervalSec || 30)) * 1000;
   const pnlPollInterval = setInterval(async () => {
     if (_managementBusy || _screeningBusy || _pnlPollBusy) return;
     if (getTrackedPositions(true).length === 0) return;
@@ -816,18 +832,22 @@ Summarize the current portfolio health, total fees earned, and performance of al
     } finally {
       _pnlPollBusy = false;
     }
-  }, 30_000);
+  }, pnlPollIntervalMs);
 
   _cronTasks = [mgmtTask, screenTask, healthTask, briefingTask, briefingWatchdog];
   // Store interval ref so stopCronJobs can clear it
   _cronTasks._pnlPollInterval = pnlPollInterval;
-  log("cron", `Cycles started — management every ${config.schedule.managementIntervalMin}m, screening every ${config.schedule.screeningIntervalMin}m`);
+  log(
+    "cron",
+    `Cycles started — management every ${config.schedule.managementIntervalMin}m, screening every ${config.schedule.screeningIntervalMin}m, health every ${config.schedule.healthCheckIntervalMin}m, PnL poll every ${Math.round(pnlPollIntervalMs / 1000)}s`
+  );
 }
 
 // ═══════════════════════════════════════════
 //  GRACEFUL SHUTDOWN
 // ═══════════════════════════════════════════
 let _shuttingDown = false;
+let _fatalExitTimer = null;
 
 function withTimeout(promise, ms) {
   let timer = null;
@@ -841,12 +861,20 @@ function withTimeout(promise, ms) {
   });
 }
 
-async function shutdown(signal) {
+async function shutdown(signal, { exitCode = 0 } = {}) {
   if (_shuttingDown) {
     log("shutdown", `Received ${signal} while shutdown is already in progress.`);
     return;
   }
   _shuttingDown = true;
+
+  if (exitCode !== 0) {
+    _fatalExitTimer = setTimeout(() => {
+      log("shutdown_error", `Forced exit after shutdown timeout (${signal})`);
+      process.exit(exitCode);
+    }, 15000);
+    if (typeof _fatalExitTimer.unref === "function") _fatalExitTimer.unref();
+  }
 
   log("shutdown", `Received ${signal}. Shutting down...`);
   stopPolling();
@@ -864,11 +892,29 @@ async function shutdown(signal) {
   } else {
     log("shutdown", "Open position snapshot skipped during shutdown timeout");
   }
-  process.exit(0);
+  if (_fatalExitTimer) clearTimeout(_fatalExitTimer);
+  process.exit(exitCode);
 }
 
 process.on("SIGINT", () => shutdown("SIGINT"));
 process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("unhandledRejection", (reason) => {
+  const error = reason instanceof Error ? reason : new Error(String(reason));
+  log("fatal_error", `Unhandled rejection: ${error.stack || error.message}`);
+  notifyOperators(`🔴 Meridian fatal error\nType: unhandledRejection\nMessage: ${error.message}`).catch(() => {});
+  shutdown("unhandledRejection", { exitCode: 1 }).catch((shutdownError) => {
+    log("shutdown_error", `Shutdown after unhandled rejection failed: ${shutdownError.message}`);
+    process.exit(1);
+  });
+});
+process.on("uncaughtException", (error) => {
+  log("fatal_error", `Uncaught exception: ${error.stack || error.message}`);
+  notifyOperators(`🔴 Meridian fatal error\nType: uncaughtException\nMessage: ${error.message}`).catch(() => {});
+  shutdown("uncaughtException", { exitCode: 1 }).catch((shutdownError) => {
+    log("shutdown_error", `Shutdown after uncaught exception failed: ${shutdownError.message}`);
+    process.exit(1);
+  });
+});
 
 // ═══════════════════════════════════════════
 //  FORMAT CANDIDATES TABLE
@@ -1262,7 +1308,9 @@ function formatHelpText() {
     "Telegram commands",
     "",
     "/help — show commands",
+    "/bind — bind this private chat as operator chat",
     "/status — wallet + positions snapshot",
+    "/whoami — show Telegram sender/chat identity",
     "/wallet — wallet, deploy amount, HiveMind status",
     "/positions — list open positions",
     "/pool <n> — detailed info for one open position",
@@ -1417,6 +1465,23 @@ async function telegramHandler(msg) {
 
   if (text === "/help") {
     await sendMessage(formatHelpText()).catch(() => {});
+    return;
+  }
+
+  if (text === "/bind") {
+    const senderId = msg?.from?.id ?? "unknown";
+    const senderUsername = msg?.from?.username ? `@${msg.from.username}` : "(no username)";
+    const boundChatId = msg?.chat?.id ?? "unknown";
+    await sendMessage(`✅ Bound this chat.\nchat_id: ${boundChatId}\nfrom.id: ${senderId}\nfrom.username: ${senderUsername}`).catch(() => {});
+    return;
+  }
+
+  if (text === "/whoami") {
+    const senderId = msg?.from?.id ?? "unknown";
+    const senderUsername = msg?.from?.username ? `@${msg.from.username}` : "(no username)";
+    const boundChatId = msg?.chat?.id ?? "unknown";
+    const chatType = msg?.chat?.type ?? "unknown";
+    await sendMessage(`chat_id: ${boundChatId}\nchat_type: ${chatType}\nfrom.id: ${senderId}\nfrom.username: ${senderUsername}`).catch(() => {});
     return;
   }
 

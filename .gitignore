@@ -6,6 +6,7 @@ node_modules/
 .env.*
 !.env.example
 .envrypt
+.backup.env
 
 # User config (contains RPC URL, wallet key, API keys)
 user-config.json
@@ -23,6 +24,8 @@ signal-weights.json
 
 # Logs
 logs/
+backup-artifacts/
+backup-worktree/
 
 # OS
 .DS_Store
