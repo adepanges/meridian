@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -109,12 +110,105 @@ func StopCronJobs() {
 
 func runManagementCycle(cfg *config.Config, silent bool) {
 	logger.Log("cron", "Management cycle — position evaluation")
+
+	walletAddr := cfg.WalletAddress()
+	if walletAddr == "" {
+		logger.Log("cron", "Management skipped — wallet not configured")
+		return
+	}
+
+	client := dlmm.NewClient(walletAddr, cfg.RPCURLOrDefault())
+	positionsResult, err := client.GetMyPositions(false)
+	if err != nil {
+		logger.Error("cron", fmt.Errorf("management pre-check failed: %w", err))
+		if !silent && telegram.IsEnabled() {
+			telegram.SendHTML("⚠️ <b>Management Cycle Failed</b>\nFailed to fetch positions: " + err.Error())
+		}
+		return
+	}
+
+	positions := positionsResult.Positions
+
+	// 1. If 0 positions, skip LLM, trigger screener
+	if len(positions) == 0 {
+		logger.Log("cron", "Management skipped — no active positions to manage")
+		if !silent && telegram.IsEnabled() {
+			telegram.SendHTML("💼 <b>Management Cycle Skipped</b>\nNo active positions to manage.")
+		}
+		// Asynchronously trigger screening cycle
+		go runScreeningCycle(cfg, silent)
+		return
+	}
+
+	// 2. Deterministic rules check to skip LLM if everything is STAY
+	needsAction := false
+	var reason string
+	for _, p := range positions {
+		// Custom instructions -> always needs LLM
+		if p.Instruction != nil && *p.Instruction != "" {
+			needsAction = true
+			reason = fmt.Sprintf("custom instruction on %s", p.Pair)
+			break
+		}
+		// Stop Loss
+		if p.PnLPct <= cfg.Management.StopLossPct {
+			needsAction = true
+			reason = fmt.Sprintf("stop loss on %s (%.2f%% <= %.2f%%)", p.Pair, p.PnLPct, cfg.Management.StopLossPct)
+			break
+		}
+		// Take Profit
+		if p.PnLPct >= cfg.Management.TakeProfitPct {
+			needsAction = true
+			reason = fmt.Sprintf("take profit on %s (%.2f%% >= %.2f%%)", p.Pair, p.PnLPct, cfg.Management.TakeProfitPct)
+			break
+		}
+		// Out of Range for too long
+		if p.MinutesOutOfRange != nil && *p.MinutesOutOfRange >= cfg.Management.OutOfRangeWaitMinutes {
+			needsAction = true
+			reason = fmt.Sprintf("%s out of range for %d minutes (limit: %d)", p.Pair, *p.MinutesOutOfRange, cfg.Management.OutOfRangeWaitMinutes)
+			break
+		}
+		// Minimum Claim threshold
+		if p.UnclaimedFeesUSD >= cfg.Management.MinClaimAmount {
+			needsAction = true
+			reason = fmt.Sprintf("claimable fees on %s ($%.2f >= $%.2f)", p.Pair, p.UnclaimedFeesUSD, cfg.Management.MinClaimAmount)
+			break
+		}
+	}
+
+	if !needsAction {
+		logger.Log("cron", "Management skipped — all positions STAY")
+		if !silent && telegram.IsEnabled() {
+			var sb strings.Builder
+			sb.WriteString("💼 <b>Management Cycle — All Healthy</b>\n\n")
+			for _, p := range positions {
+				inRangeStr := "🟢 In Range"
+				if !p.InRange {
+					oorMin := 0
+					if p.MinutesOutOfRange != nil {
+						oorMin = *p.MinutesOutOfRange
+					}
+					inRangeStr = fmt.Sprintf("🔴 Out of Range (%dm)", oorMin)
+				}
+				sb.WriteString(fmt.Sprintf("• <b>%s</b>\n"+
+					"  • Value: <code>$%.2f</code>\n"+
+					"  • Fees: <code>$%.2f</code>\n"+
+					"  • PnL: <code>%.2f%%</code>\n"+
+					"  • Status: %s\n\n",
+					p.Pair, p.TotalValueUSD, p.UnclaimedFeesUSD, p.PnLPct, inRangeStr))
+			}
+			telegram.SendHTML(sb.String())
+		}
+		return
+	}
+
+	logger.Log("cron", "Management action required — invoking LLM ("+reason+")")
+
 	var callbacks *agent.ToolCallbacks
 	var lm *telegram.LiveMessage
-	var err error
 
 	if !silent && telegram.IsEnabled() {
-		lm, err = telegram.CreateLiveMessage("💼 <b>Management Cycle</b>", "Evaluating active liquidity positions...")
+		lm, err = telegram.CreateLiveMessage("💼 <b>Management Cycle</b>", "Action required: "+reason+". Invoking LLM...")
 		if err == nil && lm != nil {
 			callbacks = &agent.ToolCallbacks{
 				OnToolStart: func(name string, args map[string]any) {
