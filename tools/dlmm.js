@@ -1175,7 +1175,23 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
   const loadPositions = async () => { try {
     let relayLpAgentByPosition = null;
     let relayRequestId = null;
-    if (shouldUseLpAgentRelay()) {
+
+    // Portfolio API discovers open pools/positions for this wallet.
+    // Detailed range data stays on Meteora PnL API; value/PnL can be overridden by LPAgent below.
+    if (!silent) log("positions", "Fetching portfolio via Meteora portfolio API...");
+    const portfolioUrl = `https://dlmm.datapi.meteora.ag/portfolio/open?user=${walletAddress}`;
+    const res = await fetch(portfolioUrl);
+    if (!res.ok) throw new Error(`Portfolio API ${res.status}: ${await res.text().catch(() => "")}`);
+    const portfolio = await res.json();
+
+    const pools = portfolio.pools || [];
+    log("positions", `Found ${pools.length} pool(s) with open positions`);
+
+    // LPAgent enrichment (relay, with direct fetch fallback) is only consumed in
+    // the per-position loop below. Skip it entirely when there are no open
+    // positions so an unavailable/slow relay doesn't burn the retry budget or
+    // emit a misleading "fallback" warning on every cycle with an empty wallet.
+    if (pools.length > 0 && shouldUseLpAgentRelay()) {
       try {
         if (!silent) log("positions", "Fetching raw LPAgent open positions via Agent Meridian relay...");
         const result = await fetchRawOpenPositionsFromMeridian({
@@ -1189,23 +1205,14 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
       }
     }
 
-    // Portfolio API discovers open pools/positions for this wallet.
-    // Detailed range data stays on Meteora PnL API; value/PnL can be overridden by LPAgent below.
-    if (!silent) log("positions", "Fetching portfolio via Meteora portfolio API...");
-    const portfolioUrl = `https://dlmm.datapi.meteora.ag/portfolio/open?user=${walletAddress}`;
-    const res = await fetch(portfolioUrl);
-    if (!res.ok) throw new Error(`Portfolio API ${res.status}: ${await res.text().catch(() => "")}`);
-    const portfolio = await res.json();
-
-    const pools = portfolio.pools || [];
-    log("positions", `Found ${pools.length} pool(s) with open positions`);
-
     // Fetch bin data (lowerBinId, upperBinId, poolActiveBinId) for all pools in parallel
     // Needed for rules 3 & 4 (active_bin vs upper_bin comparison)
     const binDataByPool = {};
     const pnlMaps = await Promise.all(pools.map(pool => fetchDlmmPnlForPool(pool.poolAddress, walletAddress)));
     pools.forEach((pool, i) => { binDataByPool[pool.poolAddress] = pnlMaps[i]; });
-    const lpAgentByPosition = relayLpAgentByPosition || await fetchLpAgentOpenPositions(walletAddress);
+    const lpAgentByPosition = pools.length === 0
+      ? {}
+      : (relayLpAgentByPosition || await fetchLpAgentOpenPositions(walletAddress));
 
     const positions = [];
     for (const pool of pools) {
