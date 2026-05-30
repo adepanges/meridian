@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -64,6 +65,14 @@ func execNodeScript(funcName string, args map[string]any) ([]byte, error) {
 
 	cmd := exec.CommandContext(ctx, "node", "--no-warnings", "--experimental-modules", "-e", script, string(argsJSON))
 	cmd.Dir = filepath.Join("..", "go-rewrite") // adjust if needed
+
+	cfg := config.Get()
+	dryRunVal := "false"
+	if cfg != nil && cfg.DryRun {
+		dryRunVal = "true"
+	}
+	cmd.Env = append(os.Environ(), fmt.Sprintf("DRY_RUN=%s", dryRunVal))
+
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
@@ -101,6 +110,14 @@ func execWalletScript(funcName string, args map[string]any) ([]byte, error) {
 
 	cmd := exec.CommandContext(ctx, "node", "--no-warnings", "--experimental-modules", "-e", script, string(argsJSON))
 	cmd.Dir = filepath.Join("..", "go-rewrite") // adjust if needed
+
+	cfg := config.Get()
+	dryRunVal := "false"
+	if cfg != nil && cfg.DryRun {
+		dryRunVal = "true"
+	}
+	cmd.Env = append(os.Environ(), fmt.Sprintf("DRY_RUN=%s", dryRunVal))
+
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
