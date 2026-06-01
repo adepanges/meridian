@@ -62,6 +62,20 @@ for (const p of closed) {
 const pf_str = pf === Infinity ? "∞" : pf.toFixed(3);
 const f = (v) => (v >= 0 ? "+" : "") + v.toFixed(2);
 
+// ── Open positions (live condition right now) ──
+if (open.length) {
+  console.log(`\n🟢 OPEN POSITIONS (${open.length})\n${"─".repeat(40)}`);
+  for (const p of open) {
+    const pnlPct = p.deposit_amount > 0 ? (p.net_pnl / p.deposit_amount) * 100 : 0;
+    const inRange = p.candles_total > 0 ? (p.candles_in_range / p.candles_total) * 100 : 0;
+    const ageMin = Math.floor((Date.now() / 1000 - (p.entry_timestamp || 0)) / 60);
+    const live = p.last_price >= p.lower_price && p.last_price <= p.upper_price ? "IN RANGE" : "OUT OF RANGE";
+    console.log(`  ${p.pair}  $${p.deposit_amount}  ${p.strategy_type}`);
+    console.log(`    PnL: $${f(p.net_pnl)} (${f(pnlPct)}%) | fees $${(p.fees_earned||0).toFixed(4)} | IL $${(p.il_usd||0).toFixed(4)}`);
+    console.log(`    peak: ${f(p.peak_pnl_pct||0)}% | in-range: ${inRange.toFixed(0)}% | now: ${live} | age: ${ageMin}m`);
+  }
+}
+
 console.log(`\n📊 PAPER VALIDATION GATE\n${"─".repeat(40)}`);
 console.log(`Sample: ${closed.length} closed / ${open.length} open`);
 console.log("");
