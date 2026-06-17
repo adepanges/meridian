@@ -194,7 +194,8 @@ The management cycle is **mostly deterministic in JS, LLM only for the hard case
    - Rule 1: stop loss, Rule 2: take profit, Rule 3: pumped far above range, Rule 4: OOR wait, Rule 5: low yield.
 5. Positions needing `CLAIM` if `unclaimed_fees_usd >= minClaimAmount`.
 6. Positions with `instruction` set are marked `INSTRUCTION` and deferred to the LLM.
-7. **LLM is invoked only if any actionMap value is not `STAY`**, with a hard-coded goal that already lists positions + their assigned action. The LLM just executes (no re-evaluation). This saves tokens and prevents hallucinated rules.
+7. **`CLOSE` and `CLAIM` actions are executed directly in JS** via `executeTool("close_position"/"claim_fees", …)` — no LLM. This keeps stop-loss / trailing-TP / OOR / low-yield exits and fee claims working even when the LLM provider is unavailable (e.g. out of credits). Going through `executeTool` (not raw `closePosition`) preserves all close side-effects (`recordClose`/`recordPerformance` in `closePosition`; `notifyClose` + auto-swap base→SOL in `executeTool`).
+8. **The LLM is invoked only for `INSTRUCTION` positions** (free-text conditions that can't be parsed in JS), and that call is wrapped in `try/catch` so a provider failure no longer aborts the cycle after deterministic closes have run.
 
 **Trailing TP two-phase confirmation** (15s recheck):
 - First poll: candidate drop queued in state.
@@ -234,7 +235,7 @@ manage cycle (every N min)
    ├─ recordPositionSnapshot per pool
    ├─ updatePnlAndCheckExits → STOP_LOSS / TRAILING_TP / OOR / LOW_YIELD
    ├─ getDeterministicCloseRule → 5 hard rules
-   ├─ LLM invoked only for non-STAY actions (or INSTRUCTION)
+   ├─ CLOSE/CLAIM executed directly in JS (executeTool); LLM only for INSTRUCTION
    └─ on close: recordClose() → recordPerformance() in lessons.js
                  ├─ recordPoolDeploy (pool-memory.json)
                  ├─ derive lesson (PREFER/AVOID/WORKED/FAILED)
